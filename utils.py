@@ -42,20 +42,20 @@ class AverageMeter(object):
         return fmtstr.format(**self.__dict__)
 
 def validate(val_loader, model, print_bool):
-    with torch.no_grad():
-        batch_time = AverageMeter('batch_time')
-        top1 = AverageMeter('top1')
-        top5 = AverageMeter('top5')
-        coverage = AverageMeter('RAPS coverage')
-        size = AverageMeter('RAPS size')
-        # switch to evaluate mode
-        model.eval()
-        end = time.time()
-        N = 0
-        for i, (x, target) in enumerate(val_loader):
-            target = target.cuda()
-            # compute output
-            output, S = model(x.cuda())
+    batch_time = AverageMeter('batch_time')
+    top1 = AverageMeter('top1')
+    top5 = AverageMeter('top5')
+    coverage = AverageMeter('RAPS coverage')
+    size = AverageMeter('RAPS size')
+    # switch to evaluate mode
+    model.eval()
+    end = time.time()
+    N = 0
+    for i, (x, target) in enumerate(val_loader):
+        target = target.cuda()
+        # compute output
+        output, S = model(x.cuda())
+        with torch.no_grad():
             # measure accuracy and record loss
             prec1, prec5 = accuracy(output, target, topk=(1, 5))
             cvg, sz = coverage_size(S, target)
@@ -159,8 +159,8 @@ def get_logits_targets(model, loader):
     labels = torch.zeros((len(loader.dataset),))
     i = 0
     print(f'Computing logits for model (only happens once).')
-    with torch.no_grad():
-        for x, targets in tqdm(loader):
+    for x, targets in tqdm(loader):
+        with torch.no_grad():
             batch_logits = model(x.cuda()).detach().cpu()
             logits[i:(i+x.shape[0]), :] = batch_logits
             labels[i:(i+x.shape[0])] = targets.cpu()
@@ -201,3 +201,27 @@ def get_logits_dataset(modelname, datasetname, datasetpath, cache=str(pathlib.Pa
         pickle.dump(dataset_logits, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     return dataset_logits
+
+
+def pgd_attack(model, images:torch.Tensor, labels:torch.Tensor, device, eps=0.3, alpha=2/255, iters=40) :
+    images = images.to(device)
+    labels = labels.to(device)
+    loss = nn.CrossEntropyLoss()
+        
+    ori_images = images.data
+    randn = torch.FloatTensor(images.size()).uniform_(-eps, eps).to(device)
+    images = ori_images + randn
+    images.clamp_(0., 1.0)
+    for _ in range(iters) :    
+        images.requires_grad = True
+        outputs = model(images)
+
+        model.zero_grad()
+        cost = loss(outputs, labels).to(device)
+        cost.backward()
+
+        adv_images = images + alpha*images.grad.sign()
+        eta = torch.clamp(adv_images - ori_images, min=-eps, max=eps)
+        images = torch.clamp(ori_images + eta, min=0, max=1).detach_()
+            
+    return images
