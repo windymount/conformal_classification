@@ -71,7 +71,7 @@ def validate(val_loader, model, print_bool):
             end = time.time()
             N = N + x.shape[0]
             if print_bool:
-                print(f'\rN: {N} | Time: {batch_time.val:.3f} ({batch_time.avg:.3f}) | Cvg@1: {top1.val:.3f} ({top1.avg:.3f}) | Cvg@5: {top5.val:.3f} ({top5.avg:.3f}) | Cvg@RAPS: {coverage.val:.3f} ({coverage.avg:.3f}) | Size@RAPS: {size.val:.3f} ({size.avg:.3f})', end='')
+                print(f'\rN: {N} | Time: {batch_time.val:.3f} ({batch_time.avg:.3f}) | Cvg@1: {top1.val:.3f} ({top1.avg:.3f}) | Cvg@5: {top5.val:.3f} ({top5.avg:.3f}) | Cvg@RAPS: {coverage.val:.3f} ({coverage.avg:.3f}) | Size@RAPS: {size.val:.3f} ({size.avg:.3f})')
     if print_bool:
         print('') #Endline
 
@@ -212,7 +212,7 @@ def pgd_attack(model, images:torch.Tensor, labels:torch.Tensor, device, eps=0.3,
     randn = torch.FloatTensor(images.size()).uniform_(-eps, eps).to(device)
     images = ori_images + randn
     images.clamp_(0., 1.0)
-    for _ in range(iters) :    
+    for _ in range(iters):   
         images.requires_grad = True
         outputs = model(images)
 

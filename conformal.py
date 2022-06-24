@@ -14,18 +14,23 @@ import pdb
 # Save it to a file in .cache/modelname
 # The only difference is that the forward method of ConformalModel also outputs a set.
 class ConformalModel(nn.Module):
-    def __init__(self, model, calib_loader, alpha, kreg=None, lamda=None, randomized=True, allow_zero_sets=False, pct_paramtune = 0.3, batch_size=32, lamda_criterion='size'):
+    def __init__(self, model, calib_loader, alpha, kreg=None, lamda=None, randomized=True, allow_zero_sets=False, pct_paramtune = 0.3, batch_size=32, lamda_criterion='size', prob_model=False):
         super(ConformalModel, self).__init__()
         self.model = model 
         self.alpha = alpha
-        self.T = torch.Tensor([1.3]) #initialize (1.3 is usually a good value)
-        self.T, calib_logits = platt(self, calib_loader)
+        self.isprob = prob_model
+        if not prob_model:
+            self.T = torch.Tensor([1.3]) #initialize (1.3 is usually a good value)
+            self.T, calib_logits = platt(self, calib_loader)
+        else:
+            self.T = 1
+            calib_logits = get_logits_targets(self.model, calib_loader)
         self.randomized=randomized
         self.allow_zero_sets=allow_zero_sets
         self.num_classes = len(calib_loader.dataset.dataset.classes)
 
         if kreg == None or lamda == None:
-            kreg, lamda, calib_logits = pick_parameters(model, calib_logits, alpha, kreg, lamda, randomized, allow_zero_sets, pct_paramtune, batch_size, lamda_criterion)
+            kreg, lamda, calib_logits = pick_parameters(model, calib_logits, alpha, kreg, lamda, randomized, allow_zero_sets, pct_paramtune, batch_size, lamda_criterion, isprob=self.isprob)
 
         self.penalties = np.zeros((1, self.num_classes))
         self.penalties[:, kreg:] += lamda 
@@ -43,7 +48,10 @@ class ConformalModel(nn.Module):
         
         with torch.no_grad():
             logits_numpy = logits.detach().cpu().numpy()
-            scores = softmax(logits_numpy/self.T.item(), axis=1)
+            if self.isprob:
+                scores = logits_numpy
+            else:
+                scores = softmax(logits_numpy/self.T.item(), axis=1)
 
             I, ordered, cumsum = sort_sum(scores)
 
@@ -91,14 +99,19 @@ def platt(cmodel, calib_loader, max_iters=10, lr=0.01, epsilon=0.01):
 ### Precomputed-logit versions of the above functions.
 
 class ConformalModelLogits(nn.Module):
-    def __init__(self, model, calib_loader, alpha, kreg=None, lamda=None, randomized=True, allow_zero_sets=False, naive=False, LAC=False, pct_paramtune = 0.3, batch_size=32, lamda_criterion='size'):
+    def __init__(self, model, calib_loader, alpha, kreg=None, lamda=None, randomized=True, allow_zero_sets=False,
+                 naive=False, LAC=False, pct_paramtune = 0.3, batch_size=32, lamda_criterion='size', prob_model=False):
         super(ConformalModelLogits, self).__init__()
         self.model = model 
         self.alpha = alpha
         self.randomized = randomized
         self.LAC = LAC
+        self.isprob = prob_model
         self.allow_zero_sets = allow_zero_sets
-        self.T = platt_logits(self, calib_loader)
+        if self.isprob:
+            self.T = 1
+        else:
+            self.T = platt_logits(self, calib_loader)
 
         if (kreg == None or lamda == None) and not naive and not LAC:
             kreg, lamda, calib_logits = pick_parameters(model, calib_loader.dataset, alpha, kreg, lamda, randomized, allow_zero_sets, pct_paramtune, batch_size, lamda_criterion)
@@ -123,7 +136,10 @@ class ConformalModelLogits(nn.Module):
         
         with torch.no_grad():
             logits_numpy = logits.detach().cpu().numpy()
-            scores = softmax(logits_numpy/self.T.item(), axis=1)
+            if self.isprob:
+                scores = logits_numpy
+            else:
+                scores = softmax(logits_numpy/self.T.item(), axis=1)
 
             if not self.LAC:
                 I, ordered, cumsum = sort_sum(scores)
@@ -139,8 +155,10 @@ def conformal_calibration_logits(cmodel, calib_loader):
         E = np.array([])
         for logits, targets in calib_loader:
             logits = logits.detach().cpu().numpy()
-
-            scores = softmax(logits/cmodel.T.item(), axis=1)
+            if cmodel.isprob:
+                scores = logits
+            else:
+                scores = softmax(logits/cmodel.T.item(), axis=1)
 
             I, ordered, cumsum = sort_sum(scores)
 
@@ -238,12 +256,13 @@ def pick_kreg(paramtune_logits, alpha):
     kstar = np.quantile(gt_locs_kstar, 1-alpha, interpolation='higher') + 1
     return kstar 
 
-def pick_lamda_size(model, paramtune_loader, alpha, kreg, randomized, allow_zero_sets):
+def pick_lamda_size(model, paramtune_loader, alpha, kreg, randomized, allow_zero_sets, isprob):
     # Calculate lamda_star
     best_size = iter(paramtune_loader).__next__()[0][1].shape[0] # number of classes 
     # Use the paramtune data to pick lamda.  Does not violate exchangeability.
     for temp_lam in [0.001, 0.01, 0.1, 0.2, 0.5]: # predefined grid, change if more precision desired.
-        conformal_model = ConformalModelLogits(model, paramtune_loader, alpha=alpha, kreg=kreg, lamda=temp_lam, randomized=randomized, allow_zero_sets=allow_zero_sets, naive=False)
+        conformal_model = ConformalModelLogits(model, paramtune_loader, alpha=alpha, kreg=kreg, lamda=temp_lam, randomized=randomized, allow_zero_sets=allow_zero_sets,
+                                               naive=False, prob_model=isprob)
         top1_avg, top5_avg, cvg_avg, sz_avg = validate(paramtune_loader, conformal_model, print_bool=False)
         if sz_avg < best_size:
             best_size = sz_avg
@@ -263,7 +282,8 @@ def pick_lamda_adaptiveness(model, paramtune_loader, alpha, kreg, randomized, al
             lamda_star = temp_lam
     return lamda_star
 
-def pick_parameters(model, calib_logits, alpha, kreg, lamda, randomized, allow_zero_sets, pct_paramtune, batch_size, lamda_criterion):
+def pick_parameters(model, calib_logits, alpha, kreg, lamda, randomized, allow_zero_sets, pct_paramtune, batch_size,
+                    lamda_criterion, isprob=False):
     num_paramtune = int(np.ceil(pct_paramtune * len(calib_logits)))
     paramtune_logits, calib_logits = tdata.random_split(calib_logits, [num_paramtune, len(calib_logits)-num_paramtune])
     calib_loader = tdata.DataLoader(calib_logits, batch_size=batch_size, shuffle=False, pin_memory=True)
@@ -273,7 +293,7 @@ def pick_parameters(model, calib_logits, alpha, kreg, lamda, randomized, allow_z
         kreg = pick_kreg(paramtune_logits, alpha)
     if lamda == None:
         if lamda_criterion == "size":
-            lamda = pick_lamda_size(model, paramtune_loader, alpha, kreg, randomized, allow_zero_sets)
+            lamda = pick_lamda_size(model, paramtune_loader, alpha, kreg, randomized, allow_zero_sets, isprob)
         elif lamda_criterion == "adaptiveness":
             lamda = pick_lamda_adaptiveness(model, paramtune_loader, alpha, kreg, randomized, allow_zero_sets)
     return kreg, lamda, calib_logits

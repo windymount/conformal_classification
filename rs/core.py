@@ -33,7 +33,7 @@ class Smooth(object):
   ABSTAIN = -1
 
   def __init__(self, base_classifier: torch.nn.Module, num_classes: int,
-               sigma: float, device, mode='hard', beta=1.0, lam=0):
+               sigma: float, device, mode='hard', beta=1.0, batch_size=32):
     self.base_classifier = base_classifier
     self.num_classes = num_classes
     self.sigma = sigma
@@ -42,7 +42,7 @@ class Smooth(object):
     self.square_sum = None
     self.ss = 0
     self.beta = beta
-    self.lam = lam
+    self.batch_size = batch_size
 
   def certify(self, x: torch.tensor, n0: int, n: int, alpha: float, batch_size: int) -> (int, float):
     if self.mode == 'both':
@@ -138,3 +138,40 @@ class Smooth(object):
         sample_variance = 0
       t = np.log(2 / alpha)
       return NA / N - np.sqrt(2 * sample_variance * t / N) - 7 * t / 3 / (N - 1)
+  def __call__(self, batch:torch.Tensor, num:int=10000) -> torch.Tensor:
+    hardlist, softlist = [], []
+    for x in batch:
+      with torch.no_grad():
+        result_hard = torch.zeros(self.num_classes, dtype=int)
+        result_soft = torch.zeros(self.num_classes, dtype=float)
+        self.square_sum = torch.zeros(self.num_classes, dtype=float)
+        remain_num = num
+        for _ in range(ceil(remain_num / self.batch_size)):
+          this_batch_size = min(self.batch_size, remain_num)
+          remain_num -= this_batch_size
+          batch = x.repeat((this_batch_size, 1, 1, 1))
+          noise = torch.randn_like(batch, device=self.device) * self.sigma
+          predictions = self.base_classifier(batch + noise)
+          predictions *= self.beta
+          if self.mode == 'hard' or self.mode == 'both':
+            p_hard = predictions.argmax(1)
+            result_hard += self._count_arr(p_hard,
+                                          self.num_classes)
+          if self.mode == 'soft' or self.mode == 'both':
+            p_soft = F.softmax(predictions, 1)
+            p_soft_square = p_soft ** 2
+            p_soft = p_soft.sum(0)
+            p_soft_square = p_soft_square.sum(0)
+            result_soft += p_soft
+            self.square_sum += p_soft_square
+        if self.mode == 'hard' or 'both':
+          hardlist.append(result_hard / num)
+        if self.mode == 'soft' or 'both':
+          softlist.append(result_soft / num)
+    if self.mode == 'hard' :
+      return torch.stack(hardlist).cuda()
+    if self.mode == 'soft':
+      return torch.stack(softlist).cuda()
+    else:
+      return torch.stack(hardlist).cuda(), torch.stack(softlist).cuda()
+      
